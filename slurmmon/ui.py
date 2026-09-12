@@ -115,13 +115,12 @@ def header(state: AppState) -> RenderableType:
 
 
 def footer(state: AppState) -> RenderableType:
-    scroll_hint = "  [↑/↓ PgUp/PgDn] scroll" if state.screen != "overview" else ""
-    hints = f"[o] overview  [n] nodes  [u] users  [j] jobs{scroll_hint}  [+/-] interval  [r] refresh  [q] quit"
+    scroll_hint = "  [↑/↓ PgUp/PgDn] scroll  [[/]] page size" if state.screen != "overview" else ""
+    hints = f"[o] overview  [n] nodes  [u] users  [j] jobs  [m] my jobs{scroll_hint}  [+/-] interval  [r] refresh  [q] quit"
     return Text(hints, style="dim", justify="center")
 
 
-def my_jobs_panel(state: AppState) -> RenderableType:
-    table = Table(expand=False, box=None, pad_edge=False)
+def _my_jobs_columns(table: Table) -> None:
     table.add_column("JobID", style="bold", no_wrap=True)
     table.add_column("Partition", no_wrap=True)
     table.add_column("State", no_wrap=True)
@@ -131,50 +130,80 @@ def my_jobs_panel(state: AppState) -> RenderableType:
     table.add_column("Time", no_wrap=True)
     table.add_column("Reason / Priority", ratio=1, min_width=16)
 
+
+def _my_job_row(table: Table, row, state: AppState) -> None:
+    job = row.job
+    state_style = {
+        "RUNNING": "green",
+        "PENDING": "yellow",
+    }.get(job.state, "white")
+    gpu_str = ""
+    if job.gres.gpu:
+        gpu_str = f"{job.gres.gpu} gpu"
+    elif job.gres.shard:
+        gpu_str = f"{job.gres.shard} shard"
+
+    if job.is_running:
+        time_col = job.time_used
+        reason_col = f"fairshare {row.fairshare:.2f}" if row.fairshare is not None else ""
+    else:
+        queued = _queued_for(job.submit_time, state.server_now)
+        time_col = f"queued {queued}" if queued else "-"
+
+        reason_bits = [job.reason]
+        explanation = explain_reason(job.reason)
+        if explanation:
+            reason_bits.append(f"— {explanation}")
+        if row.prio is not None:
+            reason_bits.append(
+                f"(age={row.prio.age} fair={row.prio.fairshare} qos={row.prio.qos})"
+            )
+        if job.start_or_eta and job.start_or_eta not in ("N/A", "Unknown"):
+            reason_bits.append(f"→ eta ~{job.start_or_eta}")
+        reason_col = " ".join(reason_bits)
+
+    table.add_row(
+        job.job_id,
+        job.partition,
+        Text(job.state, style=state_style),
+        str(job.cpus),
+        _fmt_gb(job.mem_mb),
+        gpu_str,
+        time_col,
+        reason_col,
+    )
+
+
+_OVERVIEW_MY_JOBS_LIMIT = 8
+
+
+def my_jobs_panel(state: AppState) -> RenderableType:
+    table = Table(expand=False, box=None, pad_edge=False)
+    _my_jobs_columns(table)
+
     if not state.my_jobs:
         table.add_row(Text("no jobs on the selected partitions", style="dim"), "", "", "", "", "", "", "")
-    for row in state.my_jobs:
-        job = row.job
-        state_style = {
-            "RUNNING": "green",
-            "PENDING": "yellow",
-        }.get(job.state, "white")
-        gpu_str = ""
-        if job.gres.gpu:
-            gpu_str = f"{job.gres.gpu} gpu"
-        elif job.gres.shard:
-            gpu_str = f"{job.gres.shard} shard"
+    shown = state.my_jobs[:_OVERVIEW_MY_JOBS_LIMIT]
+    for row in shown:
+        _my_job_row(table, row, state)
 
-        if job.is_running:
-            time_col = job.time_used
-            reason_col = f"fairshare {row.fairshare:.2f}" if row.fairshare is not None else ""
-        else:
-            queued = _queued_for(job.submit_time, state.server_now)
-            time_col = f"queued {queued}" if queued else "-"
+    remaining = len(state.my_jobs) - len(shown)
+    title = f"My jobs ({state.slurm_user})"
+    if remaining > 0:
+        title += f"  (+{remaining} more, press 'm')"
+    return Panel(table, title=title, border_style="blue")
 
-            reason_bits = [job.reason]
-            explanation = explain_reason(job.reason)
-            if explanation:
-                reason_bits.append(f"— {explanation}")
-            if row.prio is not None:
-                reason_bits.append(
-                    f"(age={row.prio.age} fair={row.prio.fairshare} qos={row.prio.qos})"
-                )
-            if job.start_or_eta and job.start_or_eta not in ("N/A", "Unknown"):
-                reason_bits.append(f"→ eta ~{job.start_or_eta}")
-            reason_col = " ".join(reason_bits)
 
-        table.add_row(
-            job.job_id,
-            job.partition,
-            Text(job.state, style=state_style),
-            str(job.cpus),
-            _fmt_gb(job.mem_mb),
-            gpu_str,
-            time_col,
-            reason_col,
-        )
-    return Panel(table, title=f"My jobs ({state.slurm_user})", border_style="blue")
+def render_myjobs(state: AppState, height: int | None = None) -> RenderableType:
+    shown, offset, total = _scroll_window(state.my_jobs, state.scroll, height, state.row_delta)
+
+    table = Table(expand=False, box=None, pad_edge=False)
+    _my_jobs_columns(table)
+    for row in shown:
+        _my_job_row(table, row, state)
+
+    title = _list_title(f"My jobs ({state.slurm_user})", offset, len(shown), total)
+    return Group(header(state), Panel(table, title=title, border_style="blue"), footer(state))
 
 
 def _partition_row(table: Table, name: str, ps: PartitionStats) -> None:
@@ -246,12 +275,22 @@ def top_users_panel(state: AppState, limit: int = 12) -> RenderableType:
 
 _LIST_SCREEN_CHROME = 8  # header(1) + panel top(1) + table top(1) + col header(1) + header sep(1) + table bottom(1) + panel bottom(1) + footer(1)
 _DEFAULT_HEIGHT = 40  # fallback when no real terminal size is available (e.g. --once)
+_MIN_VISIBLE_ROWS = 3
 
 
-def _scroll_window(items: list, scroll: int, height: int | None) -> tuple[list, int, int]:
-    """Return (visible_items, offset, total), clamping `scroll` into range."""
+def _scroll_window(items: list, scroll: int, height: int | None, row_delta: int = 0) -> tuple[list, int, int]:
+    """Return (visible_items, offset, total), clamping `scroll` into range.
+
+    `row_delta` is a user-controlled +/- nudge on top of the terminal-height-
+    derived page size (see the '['/']' keys) -- positive shows more rows,
+    negative shows fewer, both still clamped to sane bounds.
+    """
     total = len(items)
-    visible_rows = max(3, (height or _DEFAULT_HEIGHT) - _LIST_SCREEN_CHROME)
+    auto_rows = (height or _DEFAULT_HEIGHT) - _LIST_SCREEN_CHROME
+    # row_delta only ever shrinks from the terminal-height-derived max (a
+    # negative "compact this" dial) -- it can't grow past what actually fits
+    # in the real terminal, since this is a single fixed-size alt-screen frame.
+    visible_rows = max(_MIN_VISIBLE_ROWS, min(auto_rows, auto_rows + row_delta))
     max_offset = max(0, total - visible_rows)
     offset = min(max(0, scroll), max_offset)
     return items[offset : offset + visible_rows], offset, total
@@ -277,7 +316,7 @@ def render_overview(state: AppState) -> RenderableType:
 
 def render_nodes(state: AppState, height: int | None = None) -> RenderableType:
     all_nodes = sorted(state.nodes, key=lambda n: (n.partition, n.name))
-    shown, offset, total = _scroll_window(all_nodes, state.scroll, height)
+    shown, offset, total = _scroll_window(all_nodes, state.scroll, height, state.row_delta)
 
     table = Table(expand=False)
     table.add_column("Node", style="bold", no_wrap=True)
@@ -306,7 +345,7 @@ def render_nodes(state: AppState, height: int | None = None) -> RenderableType:
 
 
 def render_users(state: AppState, height: int | None = None) -> RenderableType:
-    shown, offset, total = _scroll_window(state.user_usage, state.scroll, height)
+    shown, offset, total = _scroll_window(state.user_usage, state.scroll, height, state.row_delta)
 
     table = Table(expand=False)
     table.add_column("User", style="bold", ratio=1, min_width=12)
@@ -327,7 +366,7 @@ def render_jobs(state: AppState, height: int | None = None) -> RenderableType:
     running.sort(key=lambda j: j.user)
     pending.sort(key=lambda j: j.job_id)
     all_jobs = running + pending
-    shown, offset, total = _scroll_window(all_jobs, state.scroll, height)
+    shown, offset, total = _scroll_window(all_jobs, state.scroll, height, state.row_delta)
 
     table = Table(expand=False)
     table.add_column("JobID", style="bold", no_wrap=True)
@@ -366,4 +405,6 @@ def render(state: AppState, height: int | None = None) -> RenderableType:
         return render_users(state, height)
     if state.screen == "jobs":
         return render_jobs(state, height)
+    if state.screen == "myjobs":
+        return render_myjobs(state, height)
     return render_overview(state)

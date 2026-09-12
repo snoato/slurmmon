@@ -45,3 +45,23 @@ def test_list_title_shows_plain_count_when_everything_fits():
 
 def test_list_title_empty():
     assert _list_title("Jobs", offset=0, shown=0, total=0) == "Jobs (none)"
+
+
+def test_row_delta_shrinks_visible_rows():
+    items = list(range(100))
+    # height=24 -> chrome=8 -> auto 16 rows; shrinking by 6 should show 10.
+    shown, offset, total = _scroll_window(items, scroll=0, height=24, row_delta=-6)
+    assert len(shown) == 10
+
+
+def test_row_delta_cannot_grow_past_terminal_height():
+    items = list(range(100))
+    # a positive row_delta must not push past what the real terminal fits.
+    shown, offset, total = _scroll_window(items, scroll=0, height=24, row_delta=50)
+    assert len(shown) == 16  # same as row_delta=0 for this height
+
+
+def test_row_delta_still_floors_at_minimum_visible_rows():
+    items = list(range(100))
+    shown, offset, total = _scroll_window(items, scroll=0, height=24, row_delta=-9999)
+    assert len(shown) == 3

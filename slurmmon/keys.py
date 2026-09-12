@@ -38,7 +38,10 @@ def raw_terminal():
 # every terminal emulator (Terminal.app, iTerm2, most Linux terminals over SSH).
 _CSI_FINAL_BYTE = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT"}
 _CSI_TILDE_CODE = {"5": "PGUP", "6": "PGDN"}
-_ESCAPE_PEEK_TIMEOUT = 0.05  # a real Escape keypress won't be followed by more bytes this fast
+_ESCAPE_PEEK_TIMEOUT = 0.15  # a real Escape keypress won't be followed by more bytes this fast;
+# generous on purpose since misreading a slightly-delayed CSI sequence as a
+# lone Escape (e.g. over a laggier SSH/terminal-multiplexer setup) silently
+# breaks PgUp/PgDn, which is worse than Escape taking 0.15s to register
 
 
 def read_key(timeout: float) -> str | None:

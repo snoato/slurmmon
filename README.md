@@ -65,8 +65,10 @@ slurmmon --local                                    # local, no SSH
 
 or set the env vars once (see Config) and just run `slurmmon`.
 
-Keys: `o` overview, `n` nodes, `u` users, `j` jobs, arrow keys/PgUp/PgDn to
-scroll a list, `+`/`-` interval, `r` refresh now, `q` quit.
+Keys: `o` overview, `n` nodes, `u` users, `j` jobs, `m` my jobs (full list --
+the overview only previews your first few), arrow keys/PgUp/PgDn to scroll a
+list, `[`/`]` to shrink/grow how many rows a list shows at once, `+`/`-`
+interval, `r` refresh now, `q` quit.
 
 ```
 slurmmon --once --json     # one snapshot as JSON, no TTY needed

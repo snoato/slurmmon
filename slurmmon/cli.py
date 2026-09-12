@@ -21,6 +21,8 @@ from .ui import render
 MIN_INTERVAL = 2.0
 MAX_INTERVAL = 300.0
 PAGE_STEP = 15
+ROW_DELTA_STEP = 2
+MIN_ROW_DELTA = -30
 
 DEFAULT_PARTITION_PREFIX = ""  # empty prefix matches every partition
 DEFAULT_INTERVAL = 30.0
@@ -189,8 +191,8 @@ def run_interactive(state: AppState) -> None:
                     continue
                 if key == "q":
                     stop_event.set()
-                elif key in ("o", "n", "u", "j"):
-                    state.screen = {"o": "overview", "n": "nodes", "u": "users", "j": "jobs"}[key]
+                elif key in ("o", "n", "u", "j", "m"):
+                    state.screen = {"o": "overview", "n": "nodes", "u": "users", "j": "jobs", "m": "myjobs"}[key]
                     state.scroll = 0
                 elif key == "UP":
                     state.scroll = max(0, state.scroll - 1)
@@ -200,6 +202,10 @@ def run_interactive(state: AppState) -> None:
                     state.scroll = max(0, state.scroll - PAGE_STEP)
                 elif key == "PGDN":
                     state.scroll += PAGE_STEP
+                elif key == "[":
+                    state.row_delta = max(MIN_ROW_DELTA, state.row_delta - ROW_DELTA_STEP)
+                elif key == "]":
+                    state.row_delta = min(0, state.row_delta + ROW_DELTA_STEP)
                 elif key == "r":
                     refresh_now.set()
                 elif key == "+":

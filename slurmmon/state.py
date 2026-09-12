@@ -30,8 +30,9 @@ class AppState:
     fetching: bool = False
     server_now: str | None = None  # "now" as reported by the query host itself, for tz-correct "queued Xh ago"
 
-    screen: str = "overview"  # overview | nodes | users | jobs
+    screen: str = "overview"  # overview | nodes | users | jobs | myjobs
     scroll: int = 0  # row offset into the current detail screen's list; reset on screen switch
+    row_delta: int = 0  # user-adjusted +/- on the auto page size ('[' / ']'); persists across screens
 
     @property
     def partitions_desc(self) -> str:
