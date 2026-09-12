@@ -34,6 +34,16 @@ class AppState:
     scroll: int = 0  # row offset into the current detail screen's list; reset on screen switch
     row_delta: int = 0  # user-adjusted +/- on the auto page size ('[' / ']'); persists across screens
 
+    selected: int = 0  # cursor row on the jobs/myjobs screens; reset on screen switch or filter change
+    job_filter: str = "ALL"  # ALL | RUNNING | PENDING -- cycled with 'f' on the myjobs screen
+    current_list_job_ids: list[str] = field(default_factory=list)  # job ids in display order, for Enter lookup
+
+    detail_job_id: str | None = None  # non-None while the job-detail overlay is open
+    detail_text: str | None = None
+    detail_error: str | None = None
+    detail_loading: bool = False
+    detail_scroll: int = 0
+
     @property
     def partitions_desc(self) -> str:
         return self.selector.describe()

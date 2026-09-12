@@ -7,6 +7,7 @@ available, and if so which one", polled from the main render loop.
 from __future__ import annotations
 
 import contextlib
+import os
 import select
 import sys
 
@@ -44,6 +45,20 @@ _ESCAPE_PEEK_TIMEOUT = 0.15  # a real Escape keypress won't be followed by more 
 # breaks PgUp/PgDn, which is worse than Escape taking 0.15s to register
 
 
+def _read_byte(fd: int) -> str:
+    # os.read() on the raw fd, never sys.stdin.read(): the latter goes
+    # through Python's *buffered* TextIOWrapper, which can slurp an entire
+    # multi-byte escape sequence out of the kernel in one os.read() the
+    # moment we ask for just the first byte -- select() on the raw fd then
+    # sees nothing left to peek (it's sitting in Python's own buffer, not
+    # the kernel's), so a real CSI sequence gets misread as a lone Escape,
+    # AND the still-buffered remainder desyncs onto the *next* read_key()
+    # call as if it were a brand new (bogus) keypress. Reading raw bytes
+    # one at a time keeps select()'s view of "what's pending" accurate.
+    data = os.read(fd, 1)
+    return data.decode("utf-8", errors="replace") if data else ""
+
+
 def read_key(timeout: float) -> str | None:
     """Return a single logical keypress within `timeout` seconds, or None.
 
@@ -54,26 +69,27 @@ def read_key(timeout: float) -> str | None:
     """
     if not sys.stdin.isatty():
         return None
-    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    fd = sys.stdin.fileno()
+    ready, _, _ = select.select([fd], [], [], timeout)
     if not ready:
         return None
-    ch = sys.stdin.read(1)
+    ch = _read_byte(fd)
     if ch != "\x1b":
         return ch
 
-    if not select.select([sys.stdin], [], [], _ESCAPE_PEEK_TIMEOUT)[0]:
+    if not select.select([fd], [], [], _ESCAPE_PEEK_TIMEOUT)[0]:
         return "ESC"
-    if sys.stdin.read(1) != "[":
+    if _read_byte(fd) != "[":
         return "ESC"
-    if not select.select([sys.stdin], [], [], _ESCAPE_PEEK_TIMEOUT)[0]:
+    if not select.select([fd], [], [], _ESCAPE_PEEK_TIMEOUT)[0]:
         return "ESC"
-    final = sys.stdin.read(1)
+    final = _read_byte(fd)
 
     if final in _CSI_FINAL_BYTE:
         return _CSI_FINAL_BYTE[final]
     if final in _CSI_TILDE_CODE:
         # PageUp/PageDown are "ESC [ 5 ~" / "ESC [ 6 ~" -- consume the '~'.
-        if select.select([sys.stdin], [], [], _ESCAPE_PEEK_TIMEOUT)[0]:
-            sys.stdin.read(1)
+        if select.select([fd], [], [], _ESCAPE_PEEK_TIMEOUT)[0]:
+            _read_byte(fd)
         return _CSI_TILDE_CODE[final]
     return "ESC"

@@ -16,13 +16,14 @@ from .aggregate import build_cluster_stats, build_my_jobs, build_partition_stats
 from .keys import raw_terminal, read_key
 from .ssh_client import PartitionSelector
 from .state import AppState
-from .ui import render
+from .ui import _JOB_FILTERS, render
 
 MIN_INTERVAL = 2.0
 MAX_INTERVAL = 300.0
 PAGE_STEP = 15
 ROW_DELTA_STEP = 2
 MIN_ROW_DELTA = -30
+ENTER_KEYS = ("\r", "\n")
 
 DEFAULT_PARTITION_PREFIX = ""  # empty prefix matches every partition
 DEFAULT_INTERVAL = 30.0
@@ -157,6 +158,34 @@ def snapshot_to_dict(state: AppState) -> dict:
     }
 
 
+def _fetch_job_detail_async(state: AppState, job_id: str, lock: threading.Lock) -> None:
+    """Kick off an on-demand `scontrol show job <id>` fetch (Enter on a job
+    row) in a short-lived background thread, so it never blocks the render
+    loop. Rides the same ControlMaster connection as the regular poll."""
+
+    def worker() -> None:
+        try:
+            text = ssh_client.fetch_job_detail(state.host, job_id, state.local)
+        except ssh_client.SlurmFetchError as exc:
+            with lock:
+                if state.detail_job_id == job_id:
+                    state.detail_loading = False
+                    state.detail_error = str(exc)
+            return
+        with lock:
+            if state.detail_job_id == job_id:
+                state.detail_loading = False
+                state.detail_text = text
+
+    with lock:
+        state.detail_job_id = job_id
+        state.detail_loading = True
+        state.detail_text = None
+        state.detail_error = None
+        state.detail_scroll = 0
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def run_interactive(state: AppState) -> None:
     console = Console()
     stop_event = threading.Event()
@@ -189,19 +218,45 @@ def run_interactive(state: AppState) -> None:
                 key = read_key(0.15)
                 if not key:
                     continue
+
+                if state.detail_job_id is not None:
+                    # Job-detail overlay is open: it owns the keyboard until
+                    # closed, scrolling its own text instead of the
+                    # underlying screen's selection.
+                    if key in ("q", "ESC", *ENTER_KEYS):
+                        state.detail_job_id = None
+                    elif key == "UP":
+                        state.detail_scroll = max(0, state.detail_scroll - 1)
+                    elif key == "DOWN":
+                        state.detail_scroll += 1
+                    elif key == "PGUP":
+                        state.detail_scroll = max(0, state.detail_scroll - PAGE_STEP)
+                    elif key == "PGDN":
+                        state.detail_scroll += PAGE_STEP
+                    continue
+
                 if key == "q":
                     stop_event.set()
                 elif key in ("o", "n", "u", "j", "m"):
                     state.screen = {"o": "overview", "n": "nodes", "u": "users", "j": "jobs", "m": "myjobs"}[key]
                     state.scroll = 0
+                    state.selected = 0
                 elif key == "UP":
-                    state.scroll = max(0, state.scroll - 1)
+                    state.selected -= 1
                 elif key == "DOWN":
-                    state.scroll += 1
+                    state.selected += 1
                 elif key == "PGUP":
-                    state.scroll = max(0, state.scroll - PAGE_STEP)
+                    state.selected -= PAGE_STEP
                 elif key == "PGDN":
-                    state.scroll += PAGE_STEP
+                    state.selected += PAGE_STEP
+                elif key == "f" and state.screen == "myjobs":
+                    idx = (_JOB_FILTERS.index(state.job_filter) + 1) % len(_JOB_FILTERS)
+                    state.job_filter = _JOB_FILTERS[idx]
+                    state.scroll = 0
+                    state.selected = 0
+                elif key in ENTER_KEYS and state.screen in ("jobs", "myjobs"):
+                    if state.current_list_job_ids and 0 <= state.selected < len(state.current_list_job_ids):
+                        _fetch_job_detail_async(state, state.current_list_job_ids[state.selected], lock)
                 elif key == "[":
                     state.row_delta = max(MIN_ROW_DELTA, state.row_delta - ROW_DELTA_STEP)
                 elif key == "]":

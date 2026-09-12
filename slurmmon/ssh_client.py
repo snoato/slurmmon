@@ -169,6 +169,38 @@ def fetch_raw_local(slurm_user: str, selector: PartitionSelector, timeout: float
     return _run_and_split(cmd, timeout, error_prefix="local slurm query")
 
 
+def fetch_job_detail(host: str | None, jobid: str, local: bool, timeout: float = 10.0) -> str:
+    """Run `scontrol show job <jobid>` on demand (not part of the regular
+    bundled poll) and return its raw output. Reuses the same ControlMaster
+    socket as the polling connection in remote mode, so it rides the
+    already-open connection instead of paying for a new one."""
+    if local:
+        cmd = ["scontrol", "show", "job", jobid]
+    else:
+        assert host is not None
+        opts = [
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=8",
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPersist=10m",
+            "-o", f"ControlPath={_control_path()}",
+        ]
+        cmd = ["ssh", *opts, host, "scontrol", "show", "job", jobid]
+
+    error_prefix = "local scontrol" if local else f"ssh {host}"
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise SlurmFetchError(f"{error_prefix} timed out after {timeout}s") from exc
+    except OSError as exc:
+        raise SlurmFetchError(f"failed to run {error_prefix}: {exc}") from exc
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        raise SlurmFetchError(f"{error_prefix} exited {proc.returncode}: {stderr or '(no stderr)'}")
+    return proc.stdout
+
+
 def _run_and_split(cmd: list[str], timeout: float, error_prefix: str) -> RawSections:
     try:
         proc = subprocess.run(

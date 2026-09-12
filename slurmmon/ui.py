@@ -1,5 +1,6 @@
-"""Rich-based rendering: one glanceable overview screen plus three
-keyboard-switchable detail screens (nodes / users / jobs)."""
+"""Rich-based rendering: one glanceable overview screen plus keyboard-
+switchable detail screens (nodes / users / jobs / my jobs), and an
+on-demand job-detail overlay (Enter on a job row)."""
 from __future__ import annotations
 
 import time
@@ -115,9 +116,16 @@ def header(state: AppState) -> RenderableType:
 
 
 def footer(state: AppState) -> RenderableType:
-    scroll_hint = "  [↑/↓ PgUp/PgDn] scroll  [[/]] page size" if state.screen != "overview" else ""
-    hints = f"[o] overview  [n] nodes  [u] users  [j] jobs  [m] my jobs{scroll_hint}  [+/-] interval  [r] refresh  [q] quit"
-    return Text(hints, style="dim", justify="center")
+    bits = ["[o] overview", "[n] nodes", "[u] users", "[j] jobs", "[m] my jobs"]
+    if state.screen != "overview":
+        bits.append("[↑/↓ PgUp/PgDn]")
+        if state.screen in ("jobs", "myjobs"):
+            bits.append("[Enter] info")
+        if state.screen == "myjobs":
+            bits.append("[f] filter")
+        bits.append("[[/]] size")
+    bits += ["[+/-] interval", "[r] refresh", "[q] quit"]
+    return Text("  ".join(bits), style="dim", justify="center")
 
 
 def _my_jobs_columns(table: Table) -> None:
@@ -131,7 +139,7 @@ def _my_jobs_columns(table: Table) -> None:
     table.add_column("Reason / Priority", ratio=1, min_width=16)
 
 
-def _my_job_row(table: Table, row, state: AppState) -> None:
+def _my_job_row(table: Table, row, state: AppState, *, highlight: bool = False) -> None:
     job = row.job
     state_style = {
         "RUNNING": "green",
@@ -171,10 +179,12 @@ def _my_job_row(table: Table, row, state: AppState) -> None:
         gpu_str,
         time_col,
         reason_col,
+        style=_SELECTED_ROW_STYLE if highlight else None,
     )
 
 
 _OVERVIEW_MY_JOBS_LIMIT = 8
+_JOB_FILTERS = ["ALL", "RUNNING", "PENDING"]
 
 
 def my_jobs_panel(state: AppState) -> RenderableType:
@@ -195,14 +205,28 @@ def my_jobs_panel(state: AppState) -> RenderableType:
 
 
 def render_myjobs(state: AppState, height: int | None = None) -> RenderableType:
-    shown, offset, total = _scroll_window(state.my_jobs, state.scroll, height, state.row_delta)
+    items = state.my_jobs
+    if state.job_filter != "ALL":
+        items = [r for r in items if r.job.state == state.job_filter]
+
+    shown, offset, total, selected = _scroll_window_with_selection(
+        items, state.scroll, height, state.row_delta, state.selected
+    )
+    state.scroll = offset
+    state.selected = selected
+    state.current_list_job_ids = [r.job.job_id for r in items]
 
     table = Table(expand=False, box=None, pad_edge=False)
     _my_jobs_columns(table)
-    for row in shown:
-        _my_job_row(table, row, state)
+    for i, row in enumerate(shown, start=offset):
+        _my_job_row(table, row, state, highlight=(i == selected))
 
-    title = _list_title(f"My jobs ({state.slurm_user})", offset, len(shown), total)
+    base = f"My jobs ({state.slurm_user})"
+    if state.job_filter != "ALL":
+        base += f" [filter: {state.job_filter}, 'f' to cycle]"
+    else:
+        base += " ['f' to filter]"
+    title = _list_title(base, offset, len(shown), total, hint=_MOVE_AND_ENTER_HINT)
     return Group(header(state), Panel(table, title=title, border_style="blue"), footer(state))
 
 
@@ -240,16 +264,17 @@ def partitions_panel(state: AppState) -> RenderableType:
     return Panel(table, title="Partitions", border_style="magenta")
 
 
-def _user_row(table: Table, u: UserUsage, *, highlight: bool) -> None:
-    style = "bold cyan" if highlight else None
+def _user_row(table: Table, u: UserUsage, *, is_me: bool, selected: bool = False) -> None:
+    name_style = "bold cyan" if is_me else None
+    row_style = " ".join(filter(None, [name_style, _SELECTED_ROW_STYLE if selected else None])) or None
     table.add_row(
-        Text(u.user, style=style),
+        Text(u.user, style=name_style),
         str(u.job_count),
         Text.assemble(str(u.cpus), f" ({u.cpu_share * 100:.0f}%)"),
         Text.assemble(_fmt_gb(u.mem_mb), f" ({u.mem_share * 100:.0f}%)"),
         Text.assemble(f"{u.gpu_equiv:.1f}", f" ({u.gpu_share * 100:.0f}%)"),
         _gauge(u.dominant_share, width=14),
-        style=style,
+        style=row_style,
     )
 
 
@@ -264,7 +289,7 @@ def top_users_panel(state: AppState, limit: int = 12) -> RenderableType:
 
     shown = state.user_usage[:limit]
     for u in shown:
-        _user_row(table, u, highlight=(u.user == state.slurm_user))
+        _user_row(table, u, is_me=(u.user == state.slurm_user))
 
     remaining = len(state.user_usage) - len(shown)
     title = "Who's using the cluster"
@@ -296,12 +321,47 @@ def _scroll_window(items: list, scroll: int, height: int | None, row_delta: int 
     return items[offset : offset + visible_rows], offset, total
 
 
-def _list_title(base: str, offset: int, shown: int, total: int) -> str:
+def _scroll_window_with_selection(
+    items: list, scroll: int, height: int | None, row_delta: int, selected: int
+) -> tuple[list, int, int, int]:
+    """Like `_scroll_window`, but also keeps `selected` (a cursor row,
+    absolute index into `items`) inside the visible window, nudging the
+    offset to follow it -- and returns the *clamped* selected index too, so
+    the caller can persist it back onto AppState (selection must never
+    silently drift out of range between renders, or an Enter-triggered
+    lookup by index could go stale/out of bounds)."""
+    total = len(items)
+    if total == 0:
+        return items, 0, 0, 0
+
+    auto_rows = (height or _DEFAULT_HEIGHT) - _LIST_SCREEN_CHROME
+    visible_rows = max(_MIN_VISIBLE_ROWS, min(auto_rows, auto_rows + row_delta))
+    max_offset = max(0, total - visible_rows)
+
+    selected = min(max(0, selected), total - 1)
+    offset = min(max(0, scroll), max_offset)
+    if selected < offset:
+        offset = selected
+    elif selected >= offset + visible_rows:
+        offset = selected - visible_rows + 1
+    offset = min(max(0, offset), max_offset)
+
+    return items[offset : offset + visible_rows], offset, total, selected
+
+
+_SELECTED_ROW_STYLE = "on grey35"
+
+
+_MOVE_HINT = "↑/↓ PgUp/PgDn to move"
+_MOVE_AND_ENTER_HINT = "↑/↓ PgUp/PgDn to move, Enter for info"
+
+
+def _list_title(base: str, offset: int, shown: int, total: int, *, hint: str = _MOVE_HINT) -> str:
     if total == 0:
         return f"{base} (none)"
     if shown >= total:
         return f"{base} ({total})"
-    return f"{base} ({offset + 1}-{offset + shown} of {total} -- ↑/↓ PgUp/PgDn to scroll)"
+    return f"{base} ({offset + 1}-{offset + shown} of {total} -- {hint})"
 
 
 def render_overview(state: AppState) -> RenderableType:
@@ -316,7 +376,11 @@ def render_overview(state: AppState) -> RenderableType:
 
 def render_nodes(state: AppState, height: int | None = None) -> RenderableType:
     all_nodes = sorted(state.nodes, key=lambda n: (n.partition, n.name))
-    shown, offset, total = _scroll_window(all_nodes, state.scroll, height, state.row_delta)
+    shown, offset, total, selected = _scroll_window_with_selection(
+        all_nodes, state.scroll, height, state.row_delta, state.selected
+    )
+    state.scroll = offset
+    state.selected = selected
 
     table = Table(expand=False)
     table.add_column("Node", style="bold", no_wrap=True)
@@ -325,7 +389,7 @@ def render_nodes(state: AppState, height: int | None = None) -> RenderableType:
     table.add_column("CPU (alloc/total)", justify="right", no_wrap=True)
     table.add_column("Mem", justify="right", no_wrap=True)
     table.add_column("Gres", ratio=1, min_width=10)
-    for n in shown:
+    for i, n in enumerate(shown, start=offset):
         state_style = {"idle": "green", "busy": "yellow", "unavailable": "red"}[n.bucket]
         gres = ""
         if n.gres.gpu:
@@ -339,13 +403,18 @@ def render_nodes(state: AppState, height: int | None = None) -> RenderableType:
             f"{n.cpus_alloc}/{n.cpus_total}",
             _fmt_gb(n.mem_mb),
             gres or "-",
+            style=_SELECTED_ROW_STYLE if i == selected else None,
         )
     title = _list_title("Nodes", offset, len(shown), total)
     return Group(header(state), Panel(table, title=title, border_style="magenta"), footer(state))
 
 
 def render_users(state: AppState, height: int | None = None) -> RenderableType:
-    shown, offset, total = _scroll_window(state.user_usage, state.scroll, height, state.row_delta)
+    shown, offset, total, selected = _scroll_window_with_selection(
+        state.user_usage, state.scroll, height, state.row_delta, state.selected
+    )
+    state.scroll = offset
+    state.selected = selected
 
     table = Table(expand=False)
     table.add_column("User", style="bold", ratio=1, min_width=12)
@@ -354,8 +423,8 @@ def render_users(state: AppState, height: int | None = None) -> RenderableType:
     table.add_column("Mem", justify="right", no_wrap=True)
     table.add_column("GPU", justify="right", no_wrap=True)
     table.add_column("Dominant share", no_wrap=True)
-    for u in shown:
-        _user_row(table, u, highlight=(u.user == state.slurm_user))
+    for i, u in enumerate(shown, start=offset):
+        _user_row(table, u, is_me=(u.user == state.slurm_user), selected=(i == selected))
     title = _list_title("All users", offset, len(shown), total)
     return Group(header(state), Panel(table, title=title, border_style="green"), footer(state))
 
@@ -366,7 +435,13 @@ def render_jobs(state: AppState, height: int | None = None) -> RenderableType:
     running.sort(key=lambda j: j.user)
     pending.sort(key=lambda j: j.job_id)
     all_jobs = running + pending
-    shown, offset, total = _scroll_window(all_jobs, state.scroll, height, state.row_delta)
+
+    shown, offset, total, selected = _scroll_window_with_selection(
+        all_jobs, state.scroll, height, state.row_delta, state.selected
+    )
+    state.scroll = offset
+    state.selected = selected
+    state.current_list_job_ids = [j.job_id for j in all_jobs]
 
     table = Table(expand=False)
     table.add_column("JobID", style="bold", no_wrap=True)
@@ -379,7 +454,7 @@ def render_jobs(state: AppState, height: int | None = None) -> RenderableType:
     table.add_column("Time / Reason", no_wrap=True)
     table.add_column("Nodes", ratio=1, min_width=8)
 
-    for j in shown:
+    for i, j in enumerate(shown, start=offset):
         state_style = {"RUNNING": "green", "PENDING": "yellow"}.get(j.state, "white")
         gpu_str = f"{j.gres.gpu}g" if j.gres.gpu else (f"{j.gres.shard}sh" if j.gres.shard else "")
         time_or_reason = j.time_used if j.is_running else j.reason
@@ -393,12 +468,37 @@ def render_jobs(state: AppState, height: int | None = None) -> RenderableType:
             gpu_str,
             time_or_reason,
             j.nodelist or "-",
+            style=_SELECTED_ROW_STYLE if i == selected else None,
         )
-    title = _list_title("Queue (running + pending)", offset, len(shown), total)
+    title = _list_title("Queue (running + pending)", offset, len(shown), total, hint=_MOVE_AND_ENTER_HINT)
     return Group(header(state), Panel(table, title=title, border_style="blue"), footer(state))
 
 
+def render_detail(state: AppState, height: int | None = None) -> RenderableType:
+    """Full-screen overlay for the 'scontrol show job <id>' output fetched
+    on demand when Enter is pressed on the jobs/myjobs screens."""
+    title = f"Job {state.detail_job_id}"
+    if state.detail_loading:
+        body: RenderableType = Text(f"loading scontrol show job {state.detail_job_id} ...", style="cyan")
+        border = "cyan"
+    elif state.detail_error:
+        body = Text(state.detail_error, style="red")
+        title += " -- error"
+        border = "red"
+    else:
+        lines = (state.detail_text or "").splitlines() or ["(no output)"]
+        shown, offset, total = _scroll_window(lines, state.detail_scroll, height)
+        state.detail_scroll = offset
+        body = Text("\n".join(shown))
+        title = _list_title(title, offset, len(shown), total)
+        border = "cyan"
+    hint = Text("[↑/↓ PgUp/PgDn] scroll   [Enter/Esc/q] back", style="dim", justify="center")
+    return Group(header(state), Panel(body, title=title, border_style=border), hint)
+
+
 def render(state: AppState, height: int | None = None) -> RenderableType:
+    if state.detail_job_id is not None:
+        return render_detail(state, height)
     if state.screen == "nodes":
         return render_nodes(state, height)
     if state.screen == "users":
