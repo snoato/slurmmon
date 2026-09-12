@@ -1,0 +1,12 @@
+cn-101|cpu_a|mixed|10/86/0/96|190000|(null)
+cn-102|cpu_a|down|0/0/96/96|190000|(null)
+cn-115|cpu_a|mixed|8/88/0/96|190000|(null)
+cn-116|cpu_a|down|0/0/96/96|190000|(null)
+cn-401|gpu_a|mixed-|80/48/0/128|500000|gpu:A10:4,shard:A10:96
+cn-405|gpu_a|mixed-|20/108/0/128|500000|gpu:A10:4,shard:A10:96
+cn-407|gpu_a|down*|0/0/128/128|500000|gpu:A10:4,shard:A10:96
+cn-414|gpu_a|mixed|80/32/0/112|500000|gpu:A10:4,shard:A10:96
+cn-416|gpu_b|down*|0/0/96/96|500000|gpu:L40S:4,shard:L40S:192
+cn-418|gpu_b|allocated|96/0/0/96|500000|gpu:L40S:4,shard:L40S:192
+cn-419|gpu_b|mixed-|16/80/0/96|500000|gpu:L40S:4,shard:L40S:192
+cn-427|cpu_b|mixed+planned|192/192/0/384|2319357|(null)

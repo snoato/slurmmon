@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slurmmon"
+version = "0.1.0"
+description = "htop-like terminal monitor for Slurm partitions"
+requires-python = ">=3.10"
+dependencies = ["rich>=13"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+slurmmon = "slurmmon.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["slurmmon*"]
