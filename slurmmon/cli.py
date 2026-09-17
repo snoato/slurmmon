@@ -15,7 +15,7 @@ from . import parse, ssh_client
 from .aggregate import build_cluster_stats, build_my_jobs, build_partition_stats, build_user_usage
 from .keys import raw_terminal, read_key
 from .ssh_client import PartitionSelector
-from .state import AppState
+from .state import DEFAULT_GROUP_MODE, AppState
 from .ui import GROUP_MODES, _JOB_FILTERS, render
 
 MIN_INTERVAL = 2.0
@@ -241,7 +241,7 @@ def run_interactive(state: AppState) -> None:
                     state.screen = {"o": "overview", "n": "nodes", "u": "users", "j": "jobs", "m": "myjobs"}[key]
                     state.scroll = 0
                     state.selected = 0
-                    state.group_mode = "off"
+                    state.group_mode = DEFAULT_GROUP_MODE
                     state.name_filter = None
                 elif key == "UP":
                     state.selected -= 1

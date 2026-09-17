@@ -8,6 +8,11 @@ from .aggregate import MyJobRow, PartitionStats, UserUsage
 from .parse import Job, Node
 from .ssh_client import PartitionSelector
 
+# "headers" keeps every job visible (unlike "summary", which collapses a
+# group to one row) while still surfacing per-group totals -- the more
+# informative default of the two grouped modes.
+DEFAULT_GROUP_MODE = "headers"
+
 
 @dataclass
 class AppState:
@@ -39,7 +44,7 @@ class AppState:
     current_list_job_ids: list[str] = field(default_factory=list)  # job ids (or, when current_list_is_groups, name-prefixes) in display order, for Enter lookup
     current_list_is_groups: bool = False  # whether current_list_job_ids holds group prefixes rather than real job ids
 
-    group_mode: str = "off"  # off | headers | summary -- cycled with 'g' on jobs/myjobs (see GROUP_MODES)
+    group_mode: str = DEFAULT_GROUP_MODE  # off | headers | summary -- cycled with 'g' on jobs/myjobs (see GROUP_MODES)
     name_filter: str | None = None  # set when Enter drills out of "summary" mode; restricts the flat list to that prefix
 
     detail_job_id: str | None = None  # non-None while the job-detail overlay is open

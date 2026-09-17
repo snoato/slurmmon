@@ -73,11 +73,11 @@ job` detail for it (jobs/my jobs only, Esc/Enter/q to close).
 On jobs/my jobs, `g` cycles three grouping modes by job-name prefix (e.g.
 19 `conv-arm` jobs all group as `conv-arm`; `sweep-3`/`sweep_7` group as
 `sweep`) -- the footer and panel title always show which one is active:
-- `off` -- plain per-job list (default)
-- `headers` -- same per-job list, with a summary header row (jobs/CPU/mem/
-  GPU) inserted above each group
+- `headers` (default) -- per-job list, with a summary header row (jobs/CPU/
+  mem/GPU) inserted above each group
 - `summary` -- one aggregated row per group only; `Enter` drills into a
   group's real jobs, `g` backs out
+- `off` -- plain per-job list, no grouping
 
 `f` cycles the my-jobs state filter (all/running/pending) -- also always
 shown. `[`/`]` shrink/grow how many rows are shown at once. Anywhere: `+`/

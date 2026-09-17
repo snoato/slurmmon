@@ -29,6 +29,7 @@ def test_myjobs_filter_narrows_current_list_job_ids():
         MyJobRow(job=_job("2", "alice", "PENDING")),
         MyJobRow(job=_job("3", "alice", "RUNNING")),
     ]
+    state.group_mode = "off"  # this test is about state filtering, not grouping
 
     state.job_filter = "ALL"
     render_myjobs(state, height=40)
@@ -63,6 +64,7 @@ def test_jobs_screen_populates_current_list_job_ids_in_display_order():
         _job("20", "alice", "RUNNING"),
         _job("30", "carol", "RUNNING"),
     ]
+    state.group_mode = "off"  # this test is specifically about flat-mode ordering
 
     render_jobs(state, height=40)
 
