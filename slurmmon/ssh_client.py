@@ -77,7 +77,7 @@ echo "__SENTINEL__SINFO__"
 sinfo -h -N -p "$PARTS" -o '%N|%P|%T|%C|%m|%G'
 
 echo "__SENTINEL__SQUEUE__"
-squeue -h -p "$PARTS" -o '%i|%u|%P|%T|%D|%C|%m|%b|%M|%r|%S|%N|%V'
+squeue -h -p "$PARTS" -o '%i|%u|%P|%T|%D|%C|%m|%b|%M|%r|%S|%N|%V|%j'
 
 echo "__SENTINEL__SPRIO__"
 sprio -h -u "$SUSER" 2>/dev/null || true

@@ -107,6 +107,7 @@ def test_parse_squeue_fixture_rows():
     assert running.is_running
     assert running.gres.shard == 8
     assert running.nodelist == "cn-401"
+    assert running.name == "infer"
 
 
 def test_parse_sprio_fixture_rows():

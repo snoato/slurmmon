@@ -5,12 +5,12 @@ from slurmmon.state import AppState
 from slurmmon.ui import render_jobs, render_myjobs
 
 
-def _job(job_id: str, user: str, state: str) -> Job:
+def _job(job_id: str, user: str, state: str, name: str = "job") -> Job:
     return Job(
         job_id, user, "gpu_a", state, 1, 8, 8192, GresCount(),
         "1:00" if state == "RUNNING" else "0:00",
         "None" if state == "RUNNING" else "Priority",
-        "N/A", "cn-01" if state == "RUNNING" else "", "2026-01-01T00:00:00",
+        "N/A", "cn-01" if state == "RUNNING" else "", "2026-01-01T00:00:00", name,
     )
 
 

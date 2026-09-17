@@ -241,6 +241,8 @@ def run_interactive(state: AppState) -> None:
                     state.screen = {"o": "overview", "n": "nodes", "u": "users", "j": "jobs", "m": "myjobs"}[key]
                     state.scroll = 0
                     state.selected = 0
+                    state.group_by_name = False
+                    state.name_filter = None
                 elif key == "UP":
                     state.selected -= 1
                 elif key == "DOWN":
@@ -252,11 +254,25 @@ def run_interactive(state: AppState) -> None:
                 elif key == "f" and state.screen == "myjobs":
                     idx = (_JOB_FILTERS.index(state.job_filter) + 1) % len(_JOB_FILTERS)
                     state.job_filter = _JOB_FILTERS[idx]
+                    state.name_filter = None
+                    state.scroll = 0
+                    state.selected = 0
+                elif key == "g" and state.screen in ("jobs", "myjobs"):
+                    if state.name_filter is not None:
+                        state.name_filter = None  # drilled -> back to the grouped overview
+                    else:
+                        state.group_by_name = not state.group_by_name
                     state.scroll = 0
                     state.selected = 0
                 elif key in ENTER_KEYS and state.screen in ("jobs", "myjobs"):
                     if state.current_list_job_ids and 0 <= state.selected < len(state.current_list_job_ids):
-                        _fetch_job_detail_async(state, state.current_list_job_ids[state.selected], lock)
+                        target = state.current_list_job_ids[state.selected]
+                        if state.current_list_is_groups:
+                            state.name_filter = target
+                            state.scroll = 0
+                            state.selected = 0
+                        else:
+                            _fetch_job_detail_async(state, target, lock)
                 elif key == "[":
                     state.row_delta = max(MIN_ROW_DELTA, state.row_delta - ROW_DELTA_STEP)
                 elif key == "]":

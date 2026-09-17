@@ -1,9 +1,12 @@
 """Rich-based rendering: one glanceable overview screen plus keyboard-
-switchable detail screens (nodes / users / jobs / my jobs), and an
-on-demand job-detail overlay (Enter on a job row)."""
+switchable detail screens (nodes / users / jobs / my jobs), an on-demand
+job-detail overlay (Enter on a job row), and a group-by-name-prefix view
+of jobs/my jobs ('g') with drill-down back into a flat job list."""
 from __future__ import annotations
 
+import re
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from rich.bar import Bar
@@ -13,6 +16,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .aggregate import PartitionStats, UserUsage
+from .parse import Job
 from .reasons import explain_reason
 from .state import AppState
 
@@ -92,6 +96,76 @@ def _queued_for(submit_time: str, server_now: str | None) -> str | None:
     return _fmt_duration((now - submitted).total_seconds())
 
 
+# Strips one trailing run of digits (and an optional preceding separator)
+# off a job name, e.g. "sweep-3" / "sweep_007" / "sweep7" -> "sweep". A name
+# with no trailing digits (e.g. "conv-arm") is left as-is, so jobs sharing
+# one literal name still group together trivially.
+_TRAILING_NUM_RE = re.compile(r"^(.*?)[-_.]?\d+$")
+
+
+def _name_prefix(name: str) -> str:
+    name = (name or "").strip() or "(unnamed)"
+    m = _TRAILING_NUM_RE.match(name)
+    if m and m.group(1):
+        return m.group(1)
+    return name
+
+
+@dataclass
+class _JobGroup:
+    prefix: str
+    jobs: list[Job] = field(default_factory=list)
+
+    @property
+    def count(self) -> int:
+        return len(self.jobs)
+
+    @property
+    def running(self) -> int:
+        return sum(1 for j in self.jobs if j.is_running)
+
+    @property
+    def pending(self) -> int:
+        return sum(1 for j in self.jobs if j.is_pending)
+
+    @property
+    def cpus(self) -> int:
+        return sum(j.cpus for j in self.jobs)
+
+    @property
+    def mem_mb(self) -> float:
+        return sum(j.mem_mb for j in self.jobs)
+
+    @property
+    def gpu(self) -> int:
+        return sum(j.gres.gpu for j in self.jobs)
+
+    @property
+    def shard(self) -> int:
+        return sum(j.gres.shard for j in self.jobs)
+
+    @property
+    def users(self) -> list[str]:
+        return sorted({j.user for j in self.jobs})
+
+
+def _group_by_prefix(jobs: list[Job]) -> list[_JobGroup]:
+    groups: dict[str, _JobGroup] = {}
+    for j in jobs:
+        prefix = _name_prefix(j.name)
+        groups.setdefault(prefix, _JobGroup(prefix=prefix)).jobs.append(j)
+    return sorted(groups.values(), key=lambda g: (-g.count, g.prefix))
+
+
+def _gpu_summary(gpu: int, shard: int) -> str:
+    bits = []
+    if gpu:
+        bits.append(f"{gpu}g")
+    if shard:
+        bits.append(f"{shard}sh")
+    return " ".join(bits) if bits else ""
+
+
 def header(state: AppState) -> RenderableType:
     location = "local" if state.local else state.host
     parts = [
@@ -120,7 +194,12 @@ def footer(state: AppState) -> RenderableType:
     if state.screen != "overview":
         bits.append("[↑/↓ PgUp/PgDn]")
         if state.screen in ("jobs", "myjobs"):
-            bits.append("[Enter] info")
+            grouped_top = state.group_by_name and state.name_filter is None
+            bits.append("[Enter] drill down" if grouped_top else "[Enter] info")
+            bits.append(
+                "[g] ungroup" if state.name_filter is not None
+                else ("[g] flat view" if state.group_by_name else "[g] group by name")
+            )
         if state.screen == "myjobs":
             bits.append("[f] filter")
         bits.append("[[/]] size")
@@ -130,6 +209,7 @@ def footer(state: AppState) -> RenderableType:
 
 def _my_jobs_columns(table: Table) -> None:
     table.add_column("JobID", style="bold", no_wrap=True)
+    table.add_column("Name", no_wrap=True, max_width=18, overflow="ellipsis")
     table.add_column("Partition", no_wrap=True)
     table.add_column("State", no_wrap=True)
     table.add_column("CPU", justify="right", no_wrap=True)
@@ -172,6 +252,7 @@ def _my_job_row(table: Table, row, state: AppState, *, highlight: bool = False) 
 
     table.add_row(
         job.job_id,
+        job.name,
         job.partition,
         Text(job.state, style=state_style),
         str(job.cpus),
@@ -192,7 +273,7 @@ def my_jobs_panel(state: AppState) -> RenderableType:
     _my_jobs_columns(table)
 
     if not state.my_jobs:
-        table.add_row(Text("no jobs on the selected partitions", style="dim"), "", "", "", "", "", "", "")
+        table.add_row(Text("no jobs on the selected partitions", style="dim"), "", "", "", "", "", "", "", "")
     shown = state.my_jobs[:_OVERVIEW_MY_JOBS_LIMIT]
     for row in shown:
         _my_job_row(table, row, state)
@@ -204,10 +285,66 @@ def my_jobs_panel(state: AppState) -> RenderableType:
     return Panel(table, title=title, border_style="blue")
 
 
+def _group_columns(table: Table, *, with_users: bool) -> None:
+    # Real job names can run very long (seen in practice: 100+ char sweep/
+    # config-encoding names). Rich stays within the console width either
+    # way, but as the only ratio column it would claim nearly all free
+    # width before truncating, squeezing the numeric columns down to their
+    # minimums -- bound it instead so those columns stay readable.
+    table.add_column("Name prefix", style="bold", no_wrap=True, max_width=40, overflow="ellipsis")
+    if with_users:
+        table.add_column("Users", justify="right", no_wrap=True)
+    table.add_column("Jobs", justify="right", no_wrap=True)
+    table.add_column("Running", justify="right", no_wrap=True)
+    table.add_column("Pending", justify="right", no_wrap=True)
+    table.add_column("CPU", justify="right", no_wrap=True)
+    table.add_column("Mem", justify="right", no_wrap=True)
+    table.add_column("GPU", justify="right", no_wrap=True)
+
+
+def _group_row(table: Table, g: _JobGroup, *, with_users: bool, highlight: bool) -> None:
+    cells = [g.prefix]
+    if with_users:
+        cells.append(str(len(g.users)))
+    cells += [
+        str(g.count),
+        Text(str(g.running), style="green") if g.running else "0",
+        Text(str(g.pending), style="yellow") if g.pending else "0",
+        str(g.cpus),
+        _fmt_gb(g.mem_mb),
+        _gpu_summary(g.gpu, g.shard) or "-",
+    ]
+    table.add_row(*cells, style=_SELECTED_ROW_STYLE if highlight else None)
+
+
 def render_myjobs(state: AppState, height: int | None = None) -> RenderableType:
     items = state.my_jobs
     if state.job_filter != "ALL":
         items = [r for r in items if r.job.state == state.job_filter]
+
+    if state.group_by_name and state.name_filter is None:
+        groups = _group_by_prefix([r.job for r in items])
+        shown, offset, total, selected = _scroll_window_with_selection(
+            groups, state.scroll, height, state.row_delta, state.selected
+        )
+        state.scroll = offset
+        state.selected = selected
+        state.current_list_job_ids = [g.prefix for g in groups]
+        state.current_list_is_groups = True
+
+        table = Table(expand=False, box=None, pad_edge=False)
+        _group_columns(table, with_users=False)
+        for i, g in enumerate(shown, start=offset):
+            _group_row(table, g, with_users=False, highlight=(i == selected))
+
+        title = _list_title(
+            f"My jobs ({state.slurm_user}) [grouped by name]", offset, len(shown), total, hint=_MOVE_AND_ENTER_HINT
+        )
+        return Group(header(state), Panel(table, title=title, border_style="blue"), footer(state))
+
+    state.current_list_is_groups = False
+    if state.name_filter is not None:
+        items = [r for r in items if _name_prefix(r.job.name) == state.name_filter]
 
     shown, offset, total, selected = _scroll_window_with_selection(
         items, state.scroll, height, state.row_delta, state.selected
@@ -222,10 +359,10 @@ def render_myjobs(state: AppState, height: int | None = None) -> RenderableType:
         _my_job_row(table, row, state, highlight=(i == selected))
 
     base = f"My jobs ({state.slurm_user})"
+    if state.name_filter is not None:
+        base += f" [name: {state.name_filter}*, 'g' for groups]"
     if state.job_filter != "ALL":
-        base += f" [filter: {state.job_filter}, 'f' to cycle]"
-    else:
-        base += " ['f' to filter]"
+        base += f" [state: {state.job_filter}, 'f' to cycle]"
     title = _list_title(base, offset, len(shown), total, hint=_MOVE_AND_ENTER_HINT)
     return Group(header(state), Panel(table, title=title, border_style="blue"), footer(state))
 
@@ -436,6 +573,30 @@ def render_jobs(state: AppState, height: int | None = None) -> RenderableType:
     pending.sort(key=lambda j: j.job_id)
     all_jobs = running + pending
 
+    if state.group_by_name and state.name_filter is None:
+        groups = _group_by_prefix(all_jobs)
+        shown, offset, total, selected = _scroll_window_with_selection(
+            groups, state.scroll, height, state.row_delta, state.selected
+        )
+        state.scroll = offset
+        state.selected = selected
+        state.current_list_job_ids = [g.prefix for g in groups]
+        state.current_list_is_groups = True
+
+        table = Table(expand=False)
+        _group_columns(table, with_users=True)
+        for i, g in enumerate(shown, start=offset):
+            _group_row(table, g, with_users=True, highlight=(i == selected))
+
+        title = _list_title(
+            "Queue (running + pending) [grouped by name]", offset, len(shown), total, hint=_MOVE_AND_ENTER_HINT
+        )
+        return Group(header(state), Panel(table, title=title, border_style="blue"), footer(state))
+
+    state.current_list_is_groups = False
+    if state.name_filter is not None:
+        all_jobs = [j for j in all_jobs if _name_prefix(j.name) == state.name_filter]
+
     shown, offset, total, selected = _scroll_window_with_selection(
         all_jobs, state.scroll, height, state.row_delta, state.selected
     )
@@ -445,6 +606,7 @@ def render_jobs(state: AppState, height: int | None = None) -> RenderableType:
 
     table = Table(expand=False)
     table.add_column("JobID", style="bold", no_wrap=True)
+    table.add_column("Name", no_wrap=True, max_width=18, overflow="ellipsis")
     table.add_column("User", no_wrap=True)
     table.add_column("Partition", no_wrap=True)
     table.add_column("State", no_wrap=True)
@@ -460,6 +622,7 @@ def render_jobs(state: AppState, height: int | None = None) -> RenderableType:
         time_or_reason = j.time_used if j.is_running else j.reason
         table.add_row(
             j.job_id,
+            j.name,
             Text(j.user, style="bold cyan" if j.user == state.slurm_user else None),
             j.partition,
             Text(j.state, style=state_style),
@@ -470,7 +633,10 @@ def render_jobs(state: AppState, height: int | None = None) -> RenderableType:
             j.nodelist or "-",
             style=_SELECTED_ROW_STYLE if i == selected else None,
         )
-    title = _list_title("Queue (running + pending)", offset, len(shown), total, hint=_MOVE_AND_ENTER_HINT)
+    title_base = "Queue (running + pending)"
+    if state.name_filter is not None:
+        title_base += f" [name: {state.name_filter}*, 'g' for groups]"
+    title = _list_title(title_base, offset, len(shown), total, hint=_MOVE_AND_ENTER_HINT)
     return Group(header(state), Panel(table, title=title, border_style="blue"), footer(state))
 
 

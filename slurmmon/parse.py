@@ -161,6 +161,7 @@ class Job:
     start_or_eta: str
     nodelist: str
     submit_time: str
+    name: str
 
     @property
     def is_running(self) -> bool:
@@ -173,12 +174,16 @@ class Job:
 
 def parse_squeue_line(line: str) -> Job | None:
     """Parse one line of
-    `squeue -h -o '%i|%u|%P|%T|%D|%C|%m|%b|%M|%r|%S|%N|%V'`.
+    `squeue -h -o '%i|%u|%P|%T|%D|%C|%m|%b|%M|%r|%S|%N|%V|%j'`.
+
+    Job name (%j) is last since it's the one free-form field here -- Slurm
+    doesn't allow '|' in job names, but keeping it last means a stray odd
+    character in a name can never shift the fixed-shape fields before it.
     """
     parts = line.rstrip("\n").split("|")
-    if len(parts) != 13:
+    if len(parts) != 14:
         return None
-    job_id, user, partition, state, num_nodes, cpus, mem, tres, time_used, reason, start_eta, nodelist, submit_time = parts
+    job_id, user, partition, state, num_nodes, cpus, mem, tres, time_used, reason, start_eta, nodelist, submit_time, name = parts
     try:
         num_nodes_i = int(num_nodes)
     except ValueError:
@@ -200,6 +205,7 @@ def parse_squeue_line(line: str) -> Job | None:
         reason=reason.strip(),
         start_or_eta=start_eta.strip(),
         nodelist=nodelist.strip(),
+        name=name.strip() or "(unnamed)",
         submit_time=submit_time.strip(),
     )
 
