@@ -2,7 +2,7 @@ from slurmmon.aggregate import MyJobRow
 from slurmmon.parse import GresCount, Job
 from slurmmon.ssh_client import PartitionSelector
 from slurmmon.state import AppState
-from slurmmon.ui import _group_by_prefix, _name_prefix, render_jobs, render_myjobs
+from slurmmon.ui import _flatten_grouped, _group_by_prefix, _name_prefix, render_jobs, render_myjobs
 
 
 def _job(job_id: str, user: str, state: str, name: str, gpu: int = 0, shard: int = 0) -> Job:
@@ -63,14 +63,14 @@ def test_group_by_prefix_aggregates_counts_and_resources():
     assert groups[0].prefix == "sweep"
 
 
-def test_myjobs_grouped_view_populates_group_prefixes_not_job_ids():
+def test_myjobs_summary_mode_populates_group_prefixes_not_job_ids():
     state = _make_state()
     state.my_jobs = [
         MyJobRow(job=_job("1", "alice", "RUNNING", "sweep-1")),
         MyJobRow(job=_job("2", "alice", "RUNNING", "sweep-2")),
         MyJobRow(job=_job("3", "alice", "RUNNING", "solo-job")),
     ]
-    state.group_by_name = True
+    state.group_mode = "summary"
 
     render_myjobs(state, height=40)
 
@@ -85,7 +85,7 @@ def test_myjobs_drill_down_filters_to_matching_prefix_only():
         MyJobRow(job=_job("2", "alice", "RUNNING", "sweep-2")),
         MyJobRow(job=_job("3", "alice", "RUNNING", "solo-job")),
     ]
-    state.group_by_name = True
+    state.group_mode = "summary"
     state.name_filter = "sweep"  # simulates Enter having been pressed on the "sweep" group
 
     render_myjobs(state, height=40)
@@ -95,23 +95,77 @@ def test_myjobs_drill_down_filters_to_matching_prefix_only():
     assert set(state.current_list_job_ids) == {"1", "2"}
 
 
-def test_jobs_screen_grouped_view_includes_users_and_resets_on_ungrouped_render():
+def test_myjobs_headers_mode_keeps_real_job_ids_selectable_in_group_order():
+    state = _make_state()
+    state.my_jobs = [
+        MyJobRow(job=_job("2", "alice", "RUNNING", "sweep-2")),
+        MyJobRow(job=_job("1", "alice", "RUNNING", "sweep-1")),
+        MyJobRow(job=_job("3", "alice", "RUNNING", "solo-job")),
+    ]
+    state.group_mode = "headers"
+
+    render_myjobs(state, height=40)
+
+    # headers mode never hides jobs behind a group id -- Enter must still
+    # reach a real job.
+    assert state.current_list_is_groups is False
+    # "sweep" (2 jobs) sorts before "solo-job" (1 job); within a group, jobs
+    # sort by job_id for stable, readable ordering regardless of input order.
+    assert state.current_list_job_ids == ["1", "2", "3"]
+
+
+def test_jobs_screen_summary_mode_includes_users_and_resets_on_off_render():
     state = _make_state()
     state.jobs = [
         _job("1", "alice", "RUNNING", "train-1"),
         _job("2", "bob", "RUNNING", "train-2"),
         _job("3", "carol", "PENDING", "infer"),
     ]
-    state.group_by_name = True
+    state.group_mode = "summary"
 
     render_jobs(state, height=40)
     assert state.current_list_is_groups is True
     assert set(state.current_list_job_ids) == {"train", "infer"}
 
-    state.group_by_name = False
+    state.group_mode = "off"
     render_jobs(state, height=40)
     assert state.current_list_is_groups is False
     assert set(state.current_list_job_ids) == {"1", "2", "3"}
+
+
+def test_jobs_screen_headers_mode_lists_every_job_across_groups():
+    state = _make_state()
+    state.jobs = [
+        _job("1", "alice", "RUNNING", "train-1"),
+        _job("2", "bob", "RUNNING", "train-2"),
+        _job("3", "carol", "PENDING", "infer"),
+    ]
+    state.group_mode = "headers"
+
+    render_jobs(state, height=40)
+    assert state.current_list_is_groups is False
+    assert set(state.current_list_job_ids) == {"1", "2", "3"}
+
+
+def test_flatten_grouped_selection_skips_over_header_rows():
+    jobs = [
+        _job("2", "alice", "RUNNING", "sweep-2"),
+        _job("1", "alice", "RUNNING", "sweep-1"),
+        _job("3", "bob", "RUNNING", "solo"),
+    ]
+    display, job_positions = _flatten_grouped(jobs, lambda j: j)
+
+    # display interleaves ("header", group) with ("row", job) entries; the
+    # positions recorded for each selectable job must point at "row" entries.
+    kinds_at_positions = [display[p][0] for p in job_positions]
+    assert kinds_at_positions == ["row", "row", "row"]
+
+    # "sweep" group (2 jobs) is listed before "solo" (1 job); the header for
+    # each group appears immediately before its first job.
+    assert display[0] == ("header", display[0][1])
+    assert display[0][1].prefix == "sweep"
+    assert display[job_positions[0]][1].job_id == "1"  # sorted by job_id within the group
+    assert display[job_positions[1]][1].job_id == "2"
 
 
 def test_group_name_prefix_column_is_width_bounded():

@@ -39,8 +39,8 @@ class AppState:
     current_list_job_ids: list[str] = field(default_factory=list)  # job ids (or, when current_list_is_groups, name-prefixes) in display order, for Enter lookup
     current_list_is_groups: bool = False  # whether current_list_job_ids holds group prefixes rather than real job ids
 
-    group_by_name: bool = False  # 'g' on jobs/myjobs: show jobs aggregated by job-name prefix instead of one row per job
-    name_filter: str | None = None  # set when Enter drills into a group; restricts the flat list to that prefix
+    group_mode: str = "off"  # off | headers | summary -- cycled with 'g' on jobs/myjobs (see GROUP_MODES)
+    name_filter: str | None = None  # set when Enter drills out of "summary" mode; restricts the flat list to that prefix
 
     detail_job_id: str | None = None  # non-None while the job-detail overlay is open
     detail_text: str | None = None

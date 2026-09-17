@@ -16,7 +16,7 @@ from .aggregate import build_cluster_stats, build_my_jobs, build_partition_stats
 from .keys import raw_terminal, read_key
 from .ssh_client import PartitionSelector
 from .state import AppState
-from .ui import _JOB_FILTERS, render
+from .ui import GROUP_MODES, _JOB_FILTERS, render
 
 MIN_INTERVAL = 2.0
 MAX_INTERVAL = 300.0
@@ -241,7 +241,7 @@ def run_interactive(state: AppState) -> None:
                     state.screen = {"o": "overview", "n": "nodes", "u": "users", "j": "jobs", "m": "myjobs"}[key]
                     state.scroll = 0
                     state.selected = 0
-                    state.group_by_name = False
+                    state.group_mode = "off"
                     state.name_filter = None
                 elif key == "UP":
                     state.selected -= 1
@@ -259,9 +259,10 @@ def run_interactive(state: AppState) -> None:
                     state.selected = 0
                 elif key == "g" and state.screen in ("jobs", "myjobs"):
                     if state.name_filter is not None:
-                        state.name_filter = None  # drilled -> back to the grouped overview
+                        state.name_filter = None  # drilled -> back to the "summary" overview
                     else:
-                        state.group_by_name = not state.group_by_name
+                        idx = (GROUP_MODES.index(state.group_mode) + 1) % len(GROUP_MODES)
+                        state.group_mode = GROUP_MODES[idx]
                     state.scroll = 0
                     state.selected = 0
                 elif key in ENTER_KEYS and state.screen in ("jobs", "myjobs"):

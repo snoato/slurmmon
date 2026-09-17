@@ -68,12 +68,20 @@ or set the env vars once (see Config) and just run `slurmmon`.
 Keys: `o` overview, `n` nodes, `u` users, `j` jobs (queue), `m` my jobs (full
 list -- the overview only previews your first few). On a list screen: arrow
 keys/PgUp/PgDn move the highlighted row, `Enter` shows full `scontrol show
-job` detail for it (jobs/my jobs only, Esc/Enter/q to close). On jobs/my
-jobs: `g` groups by job-name prefix (e.g. 19 `conv-arm` jobs collapse into
-one row with summed CPU/mem/GPU), `Enter` on a group drills into just those
-jobs, `g` again backs out; `f` cycles the my-jobs state filter
-(all/running/pending). `[`/`]` shrink/grow how many rows are shown at once.
-Anywhere: `+`/`-` interval, `r` refresh now, `q` quit.
+job` detail for it (jobs/my jobs only, Esc/Enter/q to close).
+
+On jobs/my jobs, `g` cycles three grouping modes by job-name prefix (e.g.
+19 `conv-arm` jobs all group as `conv-arm`; `sweep-3`/`sweep_7` group as
+`sweep`) -- the footer and panel title always show which one is active:
+- `off` -- plain per-job list (default)
+- `headers` -- same per-job list, with a summary header row (jobs/CPU/mem/
+  GPU) inserted above each group
+- `summary` -- one aggregated row per group only; `Enter` drills into a
+  group's real jobs, `g` backs out
+
+`f` cycles the my-jobs state filter (all/running/pending) -- also always
+shown. `[`/`]` shrink/grow how many rows are shown at once. Anywhere: `+`/
+`-` interval, `r` refresh now, `q` quit.
 
 ```
 slurmmon --once --json     # one snapshot as JSON, no TTY needed
