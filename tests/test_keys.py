@@ -1,6 +1,6 @@
 import os
 
-from slurmmon.keys import read_key
+from slurmmon.keys import OSC_PREFIX, read_key
 
 
 class _FakeStdin:
@@ -72,4 +72,36 @@ def test_read_key_lone_escape_returns_esc(monkeypatch):
 
 def test_read_key_no_input_returns_none(monkeypatch):
     _pipe_pair(monkeypatch)
+    assert read_key(0.05) is None
+
+
+def test_read_key_background_reply_st_terminated(monkeypatch):
+    r, w = _pipe_pair(monkeypatch)
+    os.write(w, b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\")
+    assert read_key(1.0) == OSC_PREFIX + "11;rgb:ffff/ffff/ffff"
+
+
+def test_read_key_background_reply_bel_terminated(monkeypatch):
+    r, w = _pipe_pair(monkeypatch)
+    os.write(w, b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07")
+    assert read_key(1.0) == OSC_PREFIX + "11;rgb:1e1e/1e1e/1e1e"
+
+
+def test_read_key_background_reply_is_consumed_whole(monkeypatch):
+    # Left half-read, the payload would replay as keypresses -- "r" (refresh),
+    # "g" (cycle grouping), "f" (cycle filter), "]" (resize), ...
+    r, w = _pipe_pair(monkeypatch)
+    os.write(w, b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\" + b"j")
+    assert read_key(1.0).startswith(OSC_PREFIX)
+    assert read_key(1.0) == "j"
+    assert read_key(0.05) is None
+
+
+def test_read_key_escape_right_before_a_reply_keeps_both(monkeypatch):
+    # A real Escape keypress with a query reply arriving inside its peek
+    # window: the reply's own ESC must not get eaten as "the byte after Escape".
+    r, w = _pipe_pair(monkeypatch)
+    os.write(w, b"\x1b" + b"\x1b]11;rgb:0000/0000/0000\x1b\\")
+    assert read_key(1.0) == "ESC"
+    assert read_key(1.0) == OSC_PREFIX + "11;rgb:0000/0000/0000"
     assert read_key(0.05) is None
