@@ -10,11 +10,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from rich.bar import Bar
-from rich.console import Group, RenderableType
+from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.panel import Panel
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
+from . import theme
 from .aggregate import PartitionStats, UserUsage
 from .parse import Job
 from .reasons import explain_reason
@@ -33,9 +35,22 @@ def _pct_color(pct: float) -> str:
     return "green"
 
 
+class _Gauge(Bar):
+    """A Bar whose empty-track color comes from the console's theme at
+    render time (theme.GAUGE_TRACK), so it can follow the terminal's
+    light/dark background instead of being baked in when the frame is built."""
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        track = console.get_style(theme.GAUGE_TRACK).bgcolor
+        # reverse=False: a selected row can be reverse video (theme.NEUTRAL),
+        # which would otherwise swap fill and track -- 7% drawn as 93%.
+        self.style = Style(color=self.style.color, bgcolor=track, reverse=False)
+        return super().__rich_console__(console, options)
+
+
 def _gauge(pct: float, width: int = _BAR_WIDTH) -> RenderableType:
     color = _pct_color(pct)
-    bar = Bar(size=1.0, begin=0, end=pct, width=width, color=color, bgcolor="grey23")
+    bar = _Gauge(size=1.0, begin=0, end=pct, width=width, color=color)
     label = Text(f" {pct * 100:4.0f}%", style=color)
     return _inline(bar, label)
 
@@ -229,10 +244,16 @@ def _scroll_window_headlined(
     return display[offset : offset + visible_rows], offset, total_jobs, selected
 
 
+# A fixed white, not ANSI "white": light terminal themes commonly remap that
+# to a mid grey (it's meant as a text color on *their* background), which
+# then washes out against the blue/red badge.
+_BADGE_TEXT = "grey100"
+
+
 def header(state: AppState) -> RenderableType:
     location = "local" if state.local else state.host
     parts = [
-        Text(" slurmmon ", style="bold white on blue"),
+        Text(" slurmmon ", style=f"bold {_BADGE_TEXT} on blue"),
         Text(f" {location} "),
         Text(f"partitions={state.partitions_desc} ", style="dim"),
         Text(f"user={state.slurm_user} ", style="dim"),
@@ -240,7 +261,7 @@ def header(state: AppState) -> RenderableType:
     if state.fetching:
         parts.append(Text(" fetching... ", style="cyan"))
     if state.last_error:
-        parts.append(Text(f" ⚠ {state.last_error} ", style="bold white on red"))
+        parts.append(Text(f" ⚠ {state.last_error} ", style=f"bold {_BADGE_TEXT} on red"))
     elif state.is_stale and state.last_success is not None:
         parts.append(Text(f" stale ({_fmt_ago(state.age_seconds)}) ", style="bold black on yellow"))
     else:
@@ -287,7 +308,7 @@ def _my_job_row(table: Table, row, state: AppState, *, highlight: bool = False) 
     state_style = {
         "RUNNING": "green",
         "PENDING": "yellow",
-    }.get(job.state, "white")
+    }.get(job.state, "")
     gpu_str = ""
     if job.gres.gpu:
         gpu_str = f"{job.gres.gpu} gpu"
@@ -531,16 +552,17 @@ def partitions_panel(state: AppState) -> RenderableType:
 
 
 def _user_row(table: Table, u: UserUsage, *, is_me: bool, selected: bool = False) -> None:
-    name_style = "bold cyan" if is_me else None
-    row_style = " ".join(filter(None, [name_style, _SELECTED_ROW_STYLE if selected else None])) or None
+    # Applied per cell rather than folded into the row style: a theme style
+    # name can't be combined with other style words in one style string.
+    me_style = "bold cyan" if is_me else ""
     table.add_row(
-        Text(u.user, style=name_style),
-        str(u.job_count),
-        Text.assemble(str(u.cpus), f" ({u.cpu_share * 100:.0f}%)"),
-        Text.assemble(_fmt_gb(u.mem_mb), f" ({u.mem_share * 100:.0f}%)"),
-        Text.assemble(f"{u.gpu_equiv:.1f}", f" ({u.gpu_share * 100:.0f}%)"),
+        Text(u.user, style=me_style),
+        Text(str(u.job_count), style=me_style),
+        Text(f"{u.cpus} ({u.cpu_share * 100:.0f}%)", style=me_style),
+        Text(f"{_fmt_gb(u.mem_mb)} ({u.mem_share * 100:.0f}%)", style=me_style),
+        Text(f"{u.gpu_equiv:.1f} ({u.gpu_share * 100:.0f}%)", style=me_style),
         _gauge(u.dominant_share, width=14),
-        style=row_style,
+        style=_SELECTED_ROW_STYLE if selected else None,
     )
 
 
@@ -615,8 +637,10 @@ def _scroll_window_with_selection(
     return items[offset : offset + visible_rows], offset, total, selected
 
 
-_SELECTED_ROW_STYLE = "on grey35"
-_GROUP_HEADER_ROW_STYLE = "bold on grey23"  # distinct from _SELECTED_ROW_STYLE so a header row never reads as "selected"
+# Theme style names, not literal colors: both paint a background, so the
+# actual shade has to depend on the terminal's light/dark mode (see theme.py).
+_SELECTED_ROW_STYLE = theme.SELECTED
+_GROUP_HEADER_ROW_STYLE = theme.GROUP_HEADER
 
 
 _MOVE_HINT = "↑/↓ PgUp/PgDn to move"
@@ -710,7 +734,7 @@ def _queue_columns(table: Table) -> None:
 
 
 def _queue_job_row(table: Table, j: Job, state: AppState, *, highlight: bool) -> None:
-    state_style = {"RUNNING": "green", "PENDING": "yellow"}.get(j.state, "white")
+    state_style = {"RUNNING": "green", "PENDING": "yellow"}.get(j.state, "")
     gpu_str = f"{j.gres.gpu}g" if j.gres.gpu else (f"{j.gres.shard}sh" if j.gres.shard else "")
     time_or_reason = j.time_used if j.is_running else j.reason
     table.add_row(

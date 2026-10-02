@@ -116,6 +116,11 @@ too to just monitor every partition you can see.
 - "who's using the cluster" is ranked by max(cpu share, mem share, gpu
   share) so GPU-heavy and CPU-heavy users are comparable.
 - Down/drained nodes don't count as capacity.
+- Light and dark terminals both work, with nothing to configure: slurmmon
+  asks the terminal for its background color (and re-checks every few
+  seconds, so switching modes mid-session is picked up). A terminal that
+  doesn't answer gets a fallback that's legible on either background, with
+  reverse-video selection.
 - All four Slurm queries run in a single call per refresh; in remote mode
   that's also a single reused SSH connection (`ControlMaster`), so polling
   stays cheap either way.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import json
 import os
@@ -8,14 +9,14 @@ import sys
 import threading
 import time
 
-from rich.console import Console
 from rich.live import Live
 
 from . import parse, ssh_client
 from .aggregate import build_cluster_stats, build_my_jobs, build_partition_stats, build_user_usage
-from .keys import raw_terminal, read_key
+from .keys import OSC_PREFIX, raw_terminal, read_key
 from .ssh_client import PartitionSelector
 from .state import DEFAULT_GROUP_MODE, AppState
+from .theme import BackgroundWatcher, make_console
 from .ui import GROUP_MODES, _JOB_FILTERS, render
 
 MIN_INTERVAL = 2.0
@@ -24,6 +25,10 @@ PAGE_STEP = 15
 ROW_DELTA_STEP = 2
 MIN_ROW_DELTA = -30
 ENTER_KEYS = ("\r", "\n")
+# On quit, how long to wait for an in-flight terminal background-color reply
+# before restoring the terminal -- arriving any later, it would land in the
+# user's shell prompt as literal "^[]11;rgb:..." junk.
+EXIT_REPLY_WAIT = 0.5
 
 DEFAULT_PARTITION_PREFIX = ""  # empty prefix matches every partition
 DEFAULT_INTERVAL = 30.0
@@ -186,8 +191,21 @@ def _fetch_job_detail_async(state: AppState, job_id: str, lock: threading.Lock) 
     threading.Thread(target=worker, daemon=True).start()
 
 
+@contextlib.contextmanager
+def _awaiting_background_reply_on_exit(watcher: BackgroundWatcher):
+    try:
+        yield
+    finally:
+        deadline = time.monotonic() + EXIT_REPLY_WAIT
+        while watcher.awaiting_reply and (left := deadline - time.monotonic()) > 0:
+            key = read_key(left)
+            if key and key.startswith(OSC_PREFIX):
+                watcher.handle_reply(key[len(OSC_PREFIX):])
+
+
 def run_interactive(state: AppState) -> None:
-    console = Console()
+    console = make_console()
+    watcher = BackgroundWatcher(console)
     stop_event = threading.Event()
     refresh_now = threading.Event()
     lock = threading.Lock()
@@ -211,12 +229,20 @@ def run_interactive(state: AppState) -> None:
     thread.start()
 
     try:
-        with raw_terminal(), Live(console=console, screen=True, auto_refresh=False) as live:
+        with (
+            raw_terminal(),
+            Live(console=console, screen=True, auto_refresh=False) as live,
+            _awaiting_background_reply_on_exit(watcher),  # last, so it exits first: still in cbreak mode
+        ):
             while not stop_event.is_set():
+                watcher.tick()
                 with lock:
                     live.update(render(state, height=console.size.height), refresh=True)
                 key = read_key(0.15)
                 if not key:
+                    continue
+                if key.startswith(OSC_PREFIX):
+                    watcher.handle_reply(key[len(OSC_PREFIX):])
                     continue
 
                 if state.detail_job_id is not None:
@@ -398,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(snapshot_to_dict(state), indent=2))
         else:
-            Console().print(render(state))
+            make_console().print(render(state))
         return 0
 
     try:

@@ -45,7 +45,21 @@ _ESCAPE_PEEK_TIMEOUT = 0.15  # a real Escape keypress won't be followed by more 
 # breaks PgUp/PgDn, which is worse than Escape taking 0.15s to register
 
 
+# A byte read one too far that belongs to the *next* sequence (see read_key's
+# "ESC ESC" case), handed back out before anything else from the fd.
+_pushback: list[str] = []
+
+OSC_PREFIX = "OSC:"
+_MAX_OSC_LEN = 256
+
+
+def _ready(fd: int, timeout: float) -> bool:
+    return bool(_pushback) or bool(select.select([fd], [], [], timeout)[0])
+
+
 def _read_byte(fd: int) -> str:
+    if _pushback:
+        return _pushback.pop()
     # os.read() on the raw fd, never sys.stdin.read(): the latter goes
     # through Python's *buffered* TextIOWrapper, which can slurp an entire
     # multi-byte escape sequence out of the kernel in one os.read() the
@@ -65,23 +79,34 @@ def read_key(timeout: float) -> str | None:
     Most keys come back as the literal character. Recognized arrow/page
     keys come back as "UP"/"DOWN"/"LEFT"/"RIGHT"/"PGUP"/"PGDN"; an
     unrecognized escape sequence or a lone Escape keypress comes back as
-    "ESC".
+    "ESC". An OSC string -- never a keypress, only ever the terminal's
+    reply to a query we sent (see theme.BackgroundWatcher) -- comes back as
+    OSC_PREFIX + its payload, and must be consumed whole here: left in the
+    input, "\x1b]11;rgb:ffff/..." would otherwise replay as the keys "]",
+    "r", "g", "f", ...
     """
     if not sys.stdin.isatty():
         return None
     fd = sys.stdin.fileno()
-    ready, _, _ = select.select([fd], [], [], timeout)
-    if not ready:
+    if not _ready(fd, timeout):
         return None
     ch = _read_byte(fd)
     if ch != "\x1b":
         return ch
 
-    if not select.select([fd], [], [], _ESCAPE_PEEK_TIMEOUT)[0]:
+    if not _ready(fd, _ESCAPE_PEEK_TIMEOUT):
         return "ESC"
-    if _read_byte(fd) != "[":
+    intro = _read_byte(fd)
+    if intro == "]":
+        return _read_osc(fd)
+    if intro == "\x1b":
+        # A lone Escape keypress with the next sequence (e.g. a query reply)
+        # hot on its heels -- that ESC starts the next one, don't eat it.
+        _pushback.append(intro)
         return "ESC"
-    if not select.select([fd], [], [], _ESCAPE_PEEK_TIMEOUT)[0]:
+    if intro != "[":
+        return "ESC"
+    if not _ready(fd, _ESCAPE_PEEK_TIMEOUT):
         return "ESC"
     final = _read_byte(fd)
 
@@ -89,7 +114,25 @@ def read_key(timeout: float) -> str | None:
         return _CSI_FINAL_BYTE[final]
     if final in _CSI_TILDE_CODE:
         # PageUp/PageDown are "ESC [ 5 ~" / "ESC [ 6 ~" -- consume the '~'.
-        if select.select([fd], [], [], _ESCAPE_PEEK_TIMEOUT)[0]:
+        if _ready(fd, _ESCAPE_PEEK_TIMEOUT):
             _read_byte(fd)
         return _CSI_TILDE_CODE[final]
     return "ESC"
+
+
+def _read_osc(fd: int) -> str:
+    """Consume the rest of an OSC string after its "ESC ]", through its BEL
+    or ST ("ESC \\") terminator, and return OSC_PREFIX + the payload."""
+    payload = []
+    while len(payload) < _MAX_OSC_LEN:
+        if not _ready(fd, _ESCAPE_PEEK_TIMEOUT):
+            return "ESC"  # truncated, or really just an Alt+] keypress
+        ch = _read_byte(fd)
+        if ch == "\x07":
+            break
+        if ch == "\x1b":
+            if _ready(fd, _ESCAPE_PEEK_TIMEOUT) and (nxt := _read_byte(fd)) != "\\":
+                _pushback.append(nxt)
+            break
+        payload.append(ch)
+    return OSC_PREFIX + "".join(payload)
