@@ -120,6 +120,26 @@ def read_key(timeout: float) -> str | None:
     return "ESC"
 
 
+def read_keys(timeout: float) -> list[str]:
+    """Wait up to `timeout` seconds for input, then return *every* key
+    already waiting (each as read_key() would), oldest first -- or [] if
+    none arrived.
+
+    For a loop that redraws between reads: a held arrow key (key repeat) or
+    a flicked scroll wheel (which terminals send as a burst of arrow keys on
+    the alternate screen) easily produces input faster than a frame can be
+    drawn, and taking just one key per frame lets the backlog grow for as
+    long as the input keeps coming -- the list keeps moving long after it
+    stops. Taking everything at once, then drawing once, keeps the screen
+    within a frame of the input no matter how fast that arrives."""
+    keys = []
+    key = read_key(timeout)
+    while key:  # "" (EOF) ends it too
+        keys.append(key)
+        key = read_key(0)
+    return keys
+
+
 def _read_osc(fd: int) -> str:
     """Consume the rest of an OSC string after its "ESC ]", through its BEL
     or ST ("ESC \\") terminator, and return OSC_PREFIX + the payload."""

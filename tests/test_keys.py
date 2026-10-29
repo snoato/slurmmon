@@ -1,6 +1,6 @@
 import os
 
-from slurmmon.keys import OSC_PREFIX, read_key
+from slurmmon.keys import OSC_PREFIX, read_key, read_keys
 
 
 class _FakeStdin:
@@ -105,3 +105,19 @@ def test_read_key_escape_right_before_a_reply_keeps_both(monkeypatch):
     assert read_key(1.0) == "ESC"
     assert read_key(1.0) == OSC_PREFIX + "11;rgb:0000/0000/0000"
     assert read_key(0.05) is None
+
+
+def test_read_keys_takes_a_whole_burst_at_once(monkeypatch):
+    # A flicked scroll wheel: dozens of arrow keys in one go, plus whatever
+    # else landed in the same burst (a key, a background-color reply).
+    r, w = _pipe_pair(monkeypatch)
+    os.write(w, b"\x1b[B" * 50 + b"\x1b]11;rgb:0000/0000/0000\x07" + b"\x1b[A" + b"q")
+    assert read_keys(1.0) == ["DOWN"] * 50 + [OSC_PREFIX + "11;rgb:0000/0000/0000", "UP", "q"]
+    assert read_keys(0.05) == []
+
+
+def test_read_keys_waits_only_for_the_first_key(monkeypatch):
+    r, w = _pipe_pair(monkeypatch)
+    assert read_keys(0.05) == []
+    os.write(w, b"j")
+    assert read_keys(1.0) == ["j"]

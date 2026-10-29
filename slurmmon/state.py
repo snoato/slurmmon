@@ -40,6 +40,10 @@ class AppState:
     row_delta: int = 0  # user-adjusted +/- on the auto page size ('[' / ']'); persists across screens
 
     selected: int = 0  # cursor row on the jobs/myjobs screens; reset on screen switch or filter change
+    # Rows in the list last rendered. Keys are handled in batches between
+    # frames, so moving the cursor clamps against this (see cli._move),
+    # not only at the next render.
+    list_length: int = 0
     job_filter: str = "ALL"  # ALL | RUNNING | PENDING -- cycled with 'f' on the myjobs screen
     current_list_job_ids: list[str] = field(default_factory=list)  # job ids (or, when current_list_is_groups, name-prefixes) in display order, for Enter lookup
     current_list_is_groups: bool = False  # whether current_list_job_ids holds group prefixes rather than real job ids
@@ -52,6 +56,7 @@ class AppState:
     detail_error: str | None = None
     detail_loading: bool = False
     detail_scroll: int = 0
+    detail_max_scroll: int = 0  # detail_scroll's upper bound as of the last render, like list_length
 
     @property
     def partitions_desc(self) -> str:

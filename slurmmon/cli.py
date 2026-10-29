@@ -8,12 +8,13 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 
 from rich.live import Live
 
 from . import parse, ssh_client
 from .aggregate import build_cluster_stats, build_my_jobs, build_partition_stats, build_user_usage
-from .keys import OSC_PREFIX, raw_terminal, read_key
+from .keys import OSC_PREFIX, raw_terminal, read_key, read_keys
 from .ssh_client import PartitionSelector
 from .state import DEFAULT_GROUP_MODE, AppState
 from .theme import BackgroundWatcher, make_console
@@ -21,6 +22,7 @@ from .ui import GROUP_MODES, _JOB_FILTERS, render
 
 MIN_INTERVAL = 2.0
 MAX_INTERVAL = 300.0
+FRAME_WAIT = 0.15  # longest to wait for input before redrawing anyway ("updated Xs ago" etc.)
 PAGE_STEP = 15
 ROW_DELTA_STEP = 2
 MIN_ROW_DELTA = -30
@@ -191,6 +193,107 @@ def _fetch_job_detail_async(state: AppState, job_id: str, lock: threading.Lock) 
     threading.Thread(target=worker, daemon=True).start()
 
 
+_MOVES = {"UP": -1, "DOWN": 1, "PGUP": -PAGE_STEP, "PGDN": PAGE_STEP}
+
+
+def _move(state: AppState, delta: int) -> None:
+    """Move the cursor (or scroll the job-detail overlay), clamped against
+    what the last frame showed. Rendering clamps again anyway, but a batch
+    of keys is handled before the next one (see _apply_keys): without this,
+    DOWN x10 then UP x3 at the bottom of a list would net out to 7 rows
+    *past* the end, clamped back to the last row -- not 3 rows above it."""
+    if state.detail_job_id is not None:
+        state.detail_scroll = max(0, min(state.detail_scroll + delta, state.detail_max_scroll))
+    else:
+        state.selected = max(0, min(state.selected + delta, state.list_length - 1))
+
+
+def _shown_list(state: AppState) -> tuple:
+    """Everything that decides which list the cursor is moving through.
+    When a key changes it, the new list has to be rendered before the next
+    key can be handled: list_length and current_list_job_ids (what moving
+    and Enter act on) only catch up on the next render."""
+    return (state.screen, state.job_filter, state.group_mode, state.name_filter, state.detail_job_id)
+
+
+def _handle_key(
+    state: AppState, key: str, *, lock: threading.Lock, refresh_now: threading.Event, stop_event: threading.Event
+) -> None:
+    if state.detail_job_id is not None:
+        # Job-detail overlay is open: it owns the keyboard until closed,
+        # scrolling its own text instead of the underlying screen's selection.
+        if key in ("q", "ESC", *ENTER_KEYS):
+            state.detail_job_id = None
+        elif key in _MOVES:
+            _move(state, _MOVES[key])
+        return
+
+    if key == "q":
+        stop_event.set()
+    elif key in ("o", "n", "u", "j", "m"):
+        state.screen = {"o": "overview", "n": "nodes", "u": "users", "j": "jobs", "m": "myjobs"}[key]
+        state.scroll = 0
+        state.selected = 0
+        state.group_mode = DEFAULT_GROUP_MODE
+        state.name_filter = None
+    elif key in _MOVES:
+        _move(state, _MOVES[key])
+    elif key == "f" and state.screen == "myjobs":
+        idx = (_JOB_FILTERS.index(state.job_filter) + 1) % len(_JOB_FILTERS)
+        state.job_filter = _JOB_FILTERS[idx]
+        state.name_filter = None
+        state.scroll = 0
+        state.selected = 0
+    elif key == "g" and state.screen in ("jobs", "myjobs"):
+        if state.name_filter is not None:
+            state.name_filter = None  # drilled -> back to the "summary" overview
+        else:
+            idx = (GROUP_MODES.index(state.group_mode) + 1) % len(GROUP_MODES)
+            state.group_mode = GROUP_MODES[idx]
+        state.scroll = 0
+        state.selected = 0
+    elif key in ENTER_KEYS and state.screen in ("jobs", "myjobs"):
+        if state.current_list_job_ids and 0 <= state.selected < len(state.current_list_job_ids):
+            target = state.current_list_job_ids[state.selected]
+            if state.current_list_is_groups:
+                state.name_filter = target
+                state.scroll = 0
+                state.selected = 0
+            else:
+                _fetch_job_detail_async(state, target, lock)
+    elif key == "[":
+        state.row_delta = max(MIN_ROW_DELTA, state.row_delta - ROW_DELTA_STEP)
+    elif key == "]":
+        state.row_delta = min(0, state.row_delta + ROW_DELTA_STEP)
+    elif key == "r":
+        refresh_now.set()
+    elif key == "+":
+        state.interval = min(state.interval + 1, MAX_INTERVAL)
+    elif key == "-":
+        state.interval = max(state.interval - 1, MIN_INTERVAL)
+
+
+def _apply_keys(
+    state: AppState,
+    pending: deque[str],
+    *,
+    lock: threading.Lock,
+    refresh_now: threading.Event,
+    stop_event: threading.Event,
+) -> None:
+    """Handle the keys in `pending`, oldest first, until it's empty -- or
+    until one of them switches to a different list (screen, filter,
+    grouping, drill-down, detail overlay), leaving the rest queued for after
+    that list has been rendered. Keys that only move within the current list
+    (the ones that arrive in floods) are all applied without a redraw in
+    between."""
+    while pending and not stop_event.is_set():
+        before = _shown_list(state)
+        _handle_key(state, pending.popleft(), lock=lock, refresh_now=refresh_now, stop_event=stop_event)
+        if _shown_list(state) != before:
+            return
+
+
 @contextlib.contextmanager
 def _awaiting_background_reply_on_exit(watcher: BackgroundWatcher):
     try:
@@ -234,82 +337,21 @@ def run_interactive(state: AppState) -> None:
             Live(console=console, screen=True, auto_refresh=False) as live,
             _awaiting_background_reply_on_exit(watcher),  # last, so it exits first: still in cbreak mode
         ):
+            pending: deque[str] = deque()
             while not stop_event.is_set():
                 watcher.tick()
+                size = console.size
                 with lock:
-                    live.update(render(state, height=console.size.height), refresh=True)
-                key = read_key(0.15)
-                if not key:
-                    continue
-                if key.startswith(OSC_PREFIX):
-                    watcher.handle_reply(key[len(OSC_PREFIX):])
-                    continue
-
-                if state.detail_job_id is not None:
-                    # Job-detail overlay is open: it owns the keyboard until
-                    # closed, scrolling its own text instead of the
-                    # underlying screen's selection.
-                    if key in ("q", "ESC", *ENTER_KEYS):
-                        state.detail_job_id = None
-                    elif key == "UP":
-                        state.detail_scroll = max(0, state.detail_scroll - 1)
-                    elif key == "DOWN":
-                        state.detail_scroll += 1
-                    elif key == "PGUP":
-                        state.detail_scroll = max(0, state.detail_scroll - PAGE_STEP)
-                    elif key == "PGDN":
-                        state.detail_scroll += PAGE_STEP
-                    continue
-
-                if key == "q":
-                    stop_event.set()
-                elif key in ("o", "n", "u", "j", "m"):
-                    state.screen = {"o": "overview", "n": "nodes", "u": "users", "j": "jobs", "m": "myjobs"}[key]
-                    state.scroll = 0
-                    state.selected = 0
-                    state.group_mode = DEFAULT_GROUP_MODE
-                    state.name_filter = None
-                elif key == "UP":
-                    state.selected -= 1
-                elif key == "DOWN":
-                    state.selected += 1
-                elif key == "PGUP":
-                    state.selected -= PAGE_STEP
-                elif key == "PGDN":
-                    state.selected += PAGE_STEP
-                elif key == "f" and state.screen == "myjobs":
-                    idx = (_JOB_FILTERS.index(state.job_filter) + 1) % len(_JOB_FILTERS)
-                    state.job_filter = _JOB_FILTERS[idx]
-                    state.name_filter = None
-                    state.scroll = 0
-                    state.selected = 0
-                elif key == "g" and state.screen in ("jobs", "myjobs"):
-                    if state.name_filter is not None:
-                        state.name_filter = None  # drilled -> back to the "summary" overview
+                    live.update(render(state, height=size.height, width=size.width), refresh=True)
+                # Everything typed since the last frame, not just one key (see
+                # read_keys) -- without waiting if some is still queued up
+                # from before that frame.
+                for key in read_keys(0 if pending else FRAME_WAIT):
+                    if key.startswith(OSC_PREFIX):
+                        watcher.handle_reply(key[len(OSC_PREFIX):])
                     else:
-                        idx = (GROUP_MODES.index(state.group_mode) + 1) % len(GROUP_MODES)
-                        state.group_mode = GROUP_MODES[idx]
-                    state.scroll = 0
-                    state.selected = 0
-                elif key in ENTER_KEYS and state.screen in ("jobs", "myjobs"):
-                    if state.current_list_job_ids and 0 <= state.selected < len(state.current_list_job_ids):
-                        target = state.current_list_job_ids[state.selected]
-                        if state.current_list_is_groups:
-                            state.name_filter = target
-                            state.scroll = 0
-                            state.selected = 0
-                        else:
-                            _fetch_job_detail_async(state, target, lock)
-                elif key == "[":
-                    state.row_delta = max(MIN_ROW_DELTA, state.row_delta - ROW_DELTA_STEP)
-                elif key == "]":
-                    state.row_delta = min(0, state.row_delta + ROW_DELTA_STEP)
-                elif key == "r":
-                    refresh_now.set()
-                elif key == "+":
-                    state.interval = min(state.interval + 1, MAX_INTERVAL)
-                elif key == "-":
-                    state.interval = max(state.interval - 1, MIN_INTERVAL)
+                        pending.append(key)
+                _apply_keys(state, pending, lock=lock, refresh_now=refresh_now, stop_event=stop_event)
     finally:
         stop_event.set()
         refresh_now.set()
